@@ -268,11 +268,13 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 
 			case ebpftracer.EventTypeFileOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
+					r.containersByPid[e.Pid] = c
 					c.onFileOpen(e.Pid, e.Fd, e.Mnt, e.Log)
 				}
 
 			case ebpftracer.EventTypeListenOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
+					r.containersByPid[e.Pid] = c
 					c.onListenOpen(e.Pid, e.SrcAddr, false)
 				} else {
 					klog.Infoln("TCP listen open from unknown container", e)
@@ -284,6 +286,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 
 			case ebpftracer.EventTypeConnectionOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
+					r.containersByPid[e.Pid] = c
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.ActualDstAddr, e.Timestamp, false, e.Duration)
 					c.attachTlsUprobes(r.tracer, e.Pid)
 				} else {
@@ -291,6 +294,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				}
 			case ebpftracer.EventTypeConnectionError:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
+					r.containersByPid[e.Pid] = c
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.ActualDstAddr, 0, true, e.Duration)
 				} else {
 					klog.Infoln("TCP connection error from unknown container", e)
