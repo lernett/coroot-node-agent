@@ -65,6 +65,12 @@ type Registry struct {
 	pythonStatsUpdateCh  chan *PythonStatsUpdate
 
 	gpuProcessUsageSampleChan chan gpu.ProcessUsageSample
+
+	// Diagnostics
+	l7EventsReceived      uint64
+	l7EventsProcessed     uint64
+	l7EventsIgnored       uint64
+	connectionEventsCount uint64
 }
 
 func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo, gpuProcessUsageSampleChan chan gpu.ProcessUsageSample) (*Registry, error) {
@@ -155,11 +161,115 @@ func (r *Registry) Close() {
 	close(r.events)
 }
 
+func (r *Registry) retryTlsUprobes() {
+	for _, c := range r.containersById {
+		c.lock.Lock()
+		for pid, p := range c.processes {
+			// Only retry if we haven't successfully attached uprobes yet
+			if len(p.uprobes) == 0 {
+				// Check if this process has active connections to HTTPS ports (443, 8443, etc)
+				hasHttpsConnections := false
+				for _, conn := range c.activeConnections {
+					if conn.Pid == pid {
+						port := conn.DestinationKey.Destination().Port()
+						if port == 443 || port == 8443 || port == 9443 {
+							hasHttpsConnections = true
+							break
+						}
+					}
+				}
+				if hasHttpsConnections {
+					klog.V(3).Infof("retrying TLS uprobe attachment for pid=%d (has HTTPS connections)", pid)
+					// Reset the flags to allow retry
+					p.openSslUprobesChecked = false
+					p.goTlsUprobesChecked = false
+					c.attachTlsUprobes(r.tracer, pid)
+				}
+			}
+		}
+		c.lock.Unlock()
+	}
+}
+
+func (r *Registry) debugActiveConnections() {
+	// Count connections in eBPF map and track which PIDs have connections
+	iter := r.tracer.ActiveConnectionsIterator()
+	var key ebpftracer.ConnectionId
+	var conn ebpftracer.Connection
+	count := 0
+	pidConnections := make(map[uint32]int)
+	for iter.Next(&key, &conn) {
+		count++
+		pidConnections[key.PID]++
+		if count <= 10 { // Log first 10
+			klog.V(2).Infof("eBPF active connection: pid=%d fd=%d timestamp=%d bytes_sent=%d bytes_received=%d",
+				key.PID, key.FD, conn.Timestamp, conn.BytesSent, conn.BytesReceived)
+		}
+	}
+	klog.Infof("Total active connections in eBPF map: %d (across %d unique PIDs)", count, len(pidConnections))
+
+	// Count connections tracked by registry
+	userSpaceCount := 0
+	userSpacePids := make(map[uint32]bool)
+	for _, c := range r.containersById {
+		c.lock.Lock()
+		userSpaceCount += len(c.activeConnections)
+		if len(c.activeConnections) > 0 {
+			klog.V(2).Infof("Container %s has %d active connections tracked", c.id, len(c.activeConnections))
+			sampleCount := 0
+			for _, conn := range c.activeConnections {
+				userSpacePids[conn.Pid] = true
+				if sampleCount < 3 {
+					// Check if this connection is in eBPF map
+					inEbpf := pidConnections[conn.Pid] > 0
+					klog.V(2).Infof("  - pid=%d fd=%d dst=%s (in_ebpf=%v)", conn.Pid, conn.Fd, conn.DestinationKey.Destination(), inEbpf)
+					sampleCount++
+				}
+			}
+		}
+		c.lock.Unlock()
+	}
+	klog.Infof("Total active connections tracked in userspace: %d", userSpaceCount)
+
+	// Check for mismatches - CRITICAL: Check containersByPid, not just activeConnections
+	// (PIDs with only listen sockets won't be in activeConnections but should be in containersByPid)
+	for pid := range pidConnections {
+		if _, inMap := r.containersByPid[pid]; !inMap {
+			klog.Warningf("CRITICAL: PID %d has connections in eBPF but NOT in containersByPid (L7 events will be dropped!)", pid)
+		} else if !userSpacePids[pid] {
+			klog.V(2).Infof("PID %d has connections in eBPF but no outbound connections tracked (likely only has listen sockets)", pid)
+		}
+	}
+
+	// Log L7 event statistics
+	klog.Infof("L7 events: received=%d processed=%d ignored=%d (%.1f%% ignored)",
+		r.l7EventsReceived, r.l7EventsProcessed, r.l7EventsIgnored,
+		float64(r.l7EventsIgnored)/float64(max(r.l7EventsReceived, 1))*100)
+	klog.Infof("Connection events received: %d", r.connectionEventsCount)
+}
+
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 	gcTicker := time.NewTicker(gcInterval)
 	defer gcTicker.Stop()
+	tlsRetryTicker := time.NewTicker(30 * time.Second)
+	defer tlsRetryTicker.Stop()
+	debugTicker := time.NewTicker(60 * time.Second)
+	defer debugTicker.Stop()
 	for {
 		select {
+		case <-debugTicker.C:
+			// Debug: periodically log connection tracking stats
+			r.debugActiveConnections()
+		case <-tlsRetryTicker.C:
+			// Periodically retry TLS uprobe attachment for processes with connections but no uprobes
+			r.retryTlsUprobes()
 		case now := <-gcTicker.C:
 			for pid, c := range r.containersByPid {
 				cg, err := proc.ReadCgroup(pid)
@@ -285,6 +395,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				}
 
 			case ebpftracer.EventTypeConnectionOpen:
+				r.connectionEventsCount++
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
 					r.containersByPid[e.Pid] = c
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.ActualDstAddr, e.Timestamp, false, e.Duration)
@@ -310,17 +421,29 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					}
 				}
 			case ebpftracer.EventTypeL7Request:
+				r.l7EventsReceived++
 				if e.L7Request == nil {
+					r.l7EventsIgnored++
+					klog.Warningf("Registry: L7 event with NIL request: pid=%d fd=%d timestamp=%d", e.Pid, e.Fd, e.Timestamp)
 					continue
 				}
-				if c := r.containersByPid[e.Pid]; c != nil {
-					ip2fqdn := c.onL7Request(e.Pid, e.Fd, e.Timestamp, e.L7Request)
-					r.ip2fqdnLock.Lock()
-					for ip, domain := range ip2fqdn {
-						r.ip2fqdn[ip] = domain
-					}
-					r.ip2fqdnLock.Unlock()
+				klog.Infof("Registry: L7 EVENT RECEIVED pid=%d fd=%d protocol=%s status=%d duration=%v payload_len=%d",
+					e.Pid, e.Fd, e.L7Request.Protocol, e.L7Request.Status, e.L7Request.Duration, len(e.L7Request.Payload))
+				// Check if PID is tracked BEFORE trying to use it
+				c := r.containersByPid[e.Pid]
+				if c == nil {
+					r.l7EventsIgnored++
+					klog.Warningf("Registry: L7 event from PID %d NOT in containersByPid (protocol=%s) - EVENT DROPPED!", e.Pid, e.L7Request.Protocol)
+					continue
 				}
+				r.l7EventsProcessed++
+				klog.Infof("Registry: L7 event dispatching to [CONTAINER=%s] (pid=%d protocol=%s)", c.id, e.Pid, e.L7Request.Protocol)
+				ip2fqdn := c.onL7Request(e.Pid, e.Fd, e.Timestamp, e.L7Request)
+				r.ip2fqdnLock.Lock()
+				for ip, domain := range ip2fqdn {
+					r.ip2fqdn[ip] = domain
+				}
+				r.ip2fqdnLock.Unlock()
 			}
 		}
 	}

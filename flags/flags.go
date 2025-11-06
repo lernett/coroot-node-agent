@@ -1,14 +1,18 @@
 package flags
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
 
 	"gopkg.in/alecthomas/kingpin.v2"
+	"k8s.io/klog/v2"
 )
 
 var (
+	klogVerbosity = kingpin.Flag("v", "Log verbosity level (0=info, 2=detailed, 3=trace)").Default("0").Int()
+
 	ListenAddress     = kingpin.Flag("listen", "Listen address - ip:port or :port").Default("0.0.0.0:80").Envar("LISTEN").String()
 	CgroupRoot        = kingpin.Flag("cgroupfs-root", "The mount point of the host cgroupfs root").Default("/sys/fs/cgroup").Envar("CGROUPFS_ROOT").String()
 	DisableLogParsing = kingpin.Flag("disable-log-parsing", "Disable container log parsing").Default("false").Envar("DISABLE_LOG_PARSING").Bool()
@@ -23,7 +27,7 @@ var (
 	ExternalNetworksWhitelist = kingpin.
 					Flag("track-public-network", "Allow track connections to the specified IP networks, all private networks are allowed by default (e.g., Y.Y.Y.Y/mask)").
 					Envar("TRACK_PUBLIC_NETWORK").
-					Default("0.0.0.0/0").
+					Default("0.0.0.0/0", "::/0").
 					Strings()
 	EphemeralPortRange = kingpin.Flag("ephemeral-port-range", "Destination and Listen TCP ports from this range will be skipped").Default("32768-60999").Envar("EPHEMERAL_PORT_RANGE").String()
 
@@ -59,6 +63,15 @@ func GetString(fl *string) string {
 		return ""
 	}
 	return *fl
+}
+
+func InitKlogVerbosity() {
+	// Set klog verbosity level from our flag
+	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
+	klog.InitFlags(fs)
+	if err := fs.Set("v", fmt.Sprintf("%d", *klogVerbosity)); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set klog verbosity: %v\n", err)
+	}
 }
 
 func init() {
