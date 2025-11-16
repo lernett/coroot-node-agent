@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"strings"
 	"time"
 
 	"github.com/coroot/coroot-node-agent/common"
@@ -16,6 +17,9 @@ type L7Metrics struct {
 }
 
 func (m *L7Metrics) observe(status, method string, duration time.Duration) {
+	// Debug logs only for Envoy
+	isEnvoy := strings.HasPrefix(m.containerID, "/k8s/contour/contour-envoy")
+
 	// Counter
 	if m.Requests != nil {
 		var err error
@@ -26,27 +30,39 @@ func (m *L7Metrics) observe(status, method string, duration time.Duration) {
 			c, err = m.Requests.GetMetricWithLabelValues(status)
 		}
 		if err != nil {
-			klog.Warningf("L7Metrics.observe: [CONTAINER=%s] COUNTER FAILED status=%q method=%q err=%v", m.containerID, status, method, err)
+			if isEnvoy {
+				klog.Warningf("L7Metrics.observe: [CONTAINER=%s] COUNTER FAILED status=%q method=%q err=%v", m.containerID, status, method, err)
+			}
 		} else {
 			c.Inc()
-			klog.Infof("L7Metrics.observe: [CONTAINER=%s] COUNTER OK status=%q", m.containerID, status)
+			if isEnvoy {
+				klog.Infof("L7Metrics.observe: [CONTAINER=%s] COUNTER OK status=%q", m.containerID, status)
+			}
 		}
 	} else {
-		klog.Warningf("L7Metrics.observe: [CONTAINER=%s] COUNTER IS NIL!", m.containerID)
+		if isEnvoy {
+			klog.Warningf("L7Metrics.observe: [CONTAINER=%s] COUNTER IS NIL!", m.containerID)
+		}
 	}
 
 	// Histogram
 	if m.Latency != nil && duration != 0 {
 		m.Latency.Observe(duration.Seconds())
-		klog.Infof("L7Metrics.observe: [CONTAINER=%s] HISTOGRAM OK duration=%v", m.containerID, duration)
+		if isEnvoy {
+			klog.Infof("L7Metrics.observe: [CONTAINER=%s] HISTOGRAM OK duration=%v", m.containerID, duration)
+		}
 	} else if m.Latency == nil {
-		klog.Warningf("L7Metrics.observe: [CONTAINER=%s] HISTOGRAM IS NIL!", m.containerID)
+		if isEnvoy {
+			klog.Warningf("L7Metrics.observe: [CONTAINER=%s] HISTOGRAM IS NIL!", m.containerID)
+		}
 	}
 }
 
 type L7Stats map[l7.Protocol]map[common.DestinationKey]*L7Metrics // protocol -> dst:actual_dst -> metrics
 
 func (s L7Stats) get(protocol l7.Protocol, key common.DestinationKey, containerID string) *L7Metrics {
+	isEnvoy := strings.HasPrefix(containerID, "/k8s/contour/contour-envoy")
+
 	if protocol == l7.ProtocolHTTP2 {
 		protocol = l7.ProtocolHTTP
 	}
@@ -57,7 +73,9 @@ func (s L7Stats) get(protocol l7.Protocol, key common.DestinationKey, containerI
 	}
 	m := protoStats[key]
 	if m == nil {
-		klog.Infof("L7Stats.get: [CONTAINER=%s] CREATE NEW metrics for %s -> %s", containerID, protocol, key)
+		if isEnvoy {
+			klog.Infof("L7Stats.get: [CONTAINER=%s] CREATE NEW metrics for %s -> %s", containerID, protocol, key)
+		}
 		m = &L7Metrics{containerID: containerID}
 		protoStats[key] = m
 		constLabels := map[string]string{"destination": key.DestinationLabelValue(), "actual_destination": key.ActualDestinationLabelValue()}
@@ -75,7 +93,9 @@ func (s L7Stats) get(protocol l7.Protocol, key common.DestinationKey, containerI
 		m.Requests = prometheus.NewCounterVec(
 			prometheus.CounterOpts{Name: cOpts.Name, Help: cOpts.Help, ConstLabels: constLabels}, labels,
 		)
-		klog.Infof("L7Stats.get: [CONTAINER=%s] CREATED counter=%s histogram=%v", containerID, cOpts.Name, m.Latency != nil)
+		if isEnvoy {
+			klog.Infof("L7Stats.get: [CONTAINER=%s] CREATED counter=%s histogram=%v", containerID, cOpts.Name, m.Latency != nil)
+		}
 	}
 	return m
 }

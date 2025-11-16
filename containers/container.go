@@ -715,8 +715,11 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	klog.Infof("onL7Request: [CONTAINER=%s] pid=%d fd=%d protocol=%s status=%d duration=%v payload_len=%d",
-		c.id, pid, fd, r.Protocol, r.Status, r.Duration, len(r.Payload))
+	isEnvoy := strings.HasPrefix(string(c.id), "/k8s/contour/contour-envoy")
+	if isEnvoy {
+		klog.Infof("onL7Request: [CONTAINER=%s] pid=%d fd=%d protocol=%s status=%d duration=%v payload_len=%d",
+			c.id, pid, fd, r.Protocol, r.Status, r.Duration, len(r.Payload))
+	}
 
 	if r.Protocol == l7.ProtocolDNS {
 		return c.onDNSRequest(r)
@@ -724,14 +727,20 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 
 	conn := c.connectionsByPidFd[PidFd{Pid: pid, Fd: fd}]
 	if conn == nil {
-		klog.Warningf("onL7Request: [CONTAINER=%s] NO CONNECTION FOUND for pid=%d fd=%d (protocol=%s)", string(c.id), pid, fd, r.Protocol)
+		if isEnvoy {
+			klog.Warningf("onL7Request: [CONTAINER=%s] NO CONNECTION FOUND for pid=%d fd=%d (protocol=%s)", string(c.id), pid, fd, r.Protocol)
+		}
 		return nil
 	}
 	if timestamp != 0 && conn.Timestamp != timestamp {
-		klog.Warningf("onL7Request: [CONTAINER=%s] TIMESTAMP MISMATCH for pid=%d fd=%d (expected=%d, got=%d)", string(c.id), pid, fd, conn.Timestamp, timestamp)
+		if isEnvoy {
+			klog.Warningf("onL7Request: [CONTAINER=%s] TIMESTAMP MISMATCH for pid=%d fd=%d (expected=%d, got=%d)", string(c.id), pid, fd, conn.Timestamp, timestamp)
+		}
 		return nil
 	}
-	klog.Infof("onL7Request: [CONTAINER=%s] connection found, destination=%s", string(c.id), conn.DestinationKey)
+	if isEnvoy {
+		klog.Infof("onL7Request: [CONTAINER=%s] connection found, destination=%s", string(c.id), conn.DestinationKey)
+	}
 	stats := c.l7Stats.get(r.Protocol, conn.DestinationKey, string(c.id))
 
 	ebpfTracesDisabled := false
@@ -748,15 +757,21 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 	switch r.Protocol {
 	case l7.ProtocolHTTP:
 		method, path := l7.ParseHttp(r.Payload)
-		klog.Infof("onL7Request HTTP: [CONTAINER=%s] method=%q path=%q status=%s duration=%v filtered=%v",
-			string(c.id), method, path, r.Status.Http(), r.Duration, common.HttpFilter.ShouldBeSkipped(path))
+		if isEnvoy {
+			klog.Infof("onL7Request HTTP: [CONTAINER=%s] method=%q path=%q status=%s duration=%v filtered=%v",
+				string(c.id), method, path, r.Status.Http(), r.Duration, common.HttpFilter.ShouldBeSkipped(path))
+		}
 		if !common.HttpFilter.ShouldBeSkipped(path) {
 			statusStr := r.Status.Http()
-			klog.Infof("onL7Request HTTP: [CONTAINER=%s] >>> CALLING stats.observe status=%q duration=%v <<<", string(c.id), statusStr, r.Duration)
+			if isEnvoy {
+				klog.Infof("onL7Request HTTP: [CONTAINER=%s] >>> CALLING stats.observe status=%q duration=%v <<<", string(c.id), statusStr, r.Duration)
+			}
 			stats.observe(statusStr, "", r.Duration)
 			trace.HttpRequest(method, path, r.Status, r.Duration)
 		} else {
-			klog.Warningf("onL7Request HTTP: [CONTAINER=%s] PATH FILTERED, skipping metrics for path=%q", string(c.id), path)
+			if isEnvoy {
+				klog.Warningf("onL7Request HTTP: [CONTAINER=%s] PATH FILTERED, skipping metrics for path=%q", string(c.id), path)
+			}
 		}
 	case l7.ProtocolHTTP2:
 		if conn.http2Parser == nil {
@@ -764,24 +779,30 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 		}
 		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration))
 
-		if len(requests) == 0 {
+		if len(requests) == 0 && isEnvoy {
 			klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] ZERO requests parsed! method=%d payload_len=%d payload=%q",
 				string(c.id), r.Method, len(r.Payload), string(r.Payload[:min(len(r.Payload), 100)]))
 		}
 
 		for i, req := range requests {
-			klog.Infof("onL7Request HTTP2[%d]: [CONTAINER=%s] method=%s path=%q status=%s grpc_status=%d duration=%v filtered=%v",
-				i, string(c.id), req.Method, req.Path, req.Status.Http(), req.GrpcStatus, req.Duration, common.HttpFilter.ShouldBeSkipped(req.Path))
+			if isEnvoy {
+				klog.Infof("onL7Request HTTP2[%d]: [CONTAINER=%s] method=%s path=%q status=%s grpc_status=%d duration=%v filtered=%v",
+					i, string(c.id), req.Method, req.Path, req.Status.Http(), req.GrpcStatus, req.Duration, common.HttpFilter.ShouldBeSkipped(req.Path))
+			}
 			if !common.HttpFilter.ShouldBeSkipped(req.Path) {
 				status := req.Status.Http()
 				if req.GrpcStatus >= 0 {
 					status = req.GrpcStatus.GRPC()
 				}
-				klog.Infof("onL7Request HTTP2: [CONTAINER=%s] >>> CALLING stats.observe status=%q duration=%v <<<", string(c.id), status, req.Duration)
+				if isEnvoy {
+					klog.Infof("onL7Request HTTP2: [CONTAINER=%s] >>> CALLING stats.observe status=%q duration=%v <<<", string(c.id), status, req.Duration)
+				}
 				stats.observe(status, "", req.Duration)
 				trace.Http2Request(req.Method, req.Path, req.Scheme, req.Status, req.GrpcStatus, req.Duration)
 			} else {
-				klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] PATH FILTERED, skipping metrics for path=%q", string(c.id), req.Path)
+				if isEnvoy {
+					klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] PATH FILTERED, skipping metrics for path=%q", string(c.id), req.Path)
+				}
 			}
 		}
 	case l7.ProtocolPostgres:

@@ -427,8 +427,6 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					klog.Warningf("Registry: L7 event with NIL request: pid=%d fd=%d timestamp=%d", e.Pid, e.Fd, e.Timestamp)
 					continue
 				}
-				klog.Infof("Registry: L7 EVENT RECEIVED pid=%d fd=%d protocol=%s status=%d duration=%v payload_len=%d",
-					e.Pid, e.Fd, e.L7Request.Protocol, e.L7Request.Status, e.L7Request.Duration, len(e.L7Request.Payload))
 				// Check if PID is tracked BEFORE trying to use it
 				c := r.containersByPid[e.Pid]
 				if c == nil {
@@ -437,7 +435,14 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					continue
 				}
 				r.l7EventsProcessed++
-				klog.Infof("Registry: L7 event dispatching to [CONTAINER=%s] (pid=%d protocol=%s)", c.id, e.Pid, e.L7Request.Protocol)
+
+				isEnvoy := strings.HasPrefix(string(c.id), "/k8s/contour/contour-envoy")
+				if isEnvoy {
+					klog.Infof("Registry: L7 EVENT RECEIVED pid=%d fd=%d protocol=%s status=%d duration=%v payload_len=%d",
+						e.Pid, e.Fd, e.L7Request.Protocol, e.L7Request.Status, e.L7Request.Duration, len(e.L7Request.Payload))
+					klog.Infof("Registry: L7 event dispatching to [CONTAINER=%s] (pid=%d protocol=%s)", c.id, e.Pid, e.L7Request.Protocol)
+				}
+
 				ip2fqdn := c.onL7Request(e.Pid, e.Fd, e.Timestamp, e.L7Request)
 				r.ip2fqdnLock.Lock()
 				for ip, domain := range ip2fqdn {
