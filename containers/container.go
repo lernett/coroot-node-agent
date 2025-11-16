@@ -732,7 +732,10 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 		return nil
 	}
 	klog.Infof("onL7Request: [CONTAINER=%s] connection found, destination=%s", string(c.id), conn.DestinationKey)
-	stats := c.l7Stats.get(r.Protocol, conn.DestinationKey)
+
+	klog.Infof("onL7Request: [CONTAINER=%s] BEFORE stats.get (protocol=%s)", string(c.id), r.Protocol)
+	stats := c.l7Stats.get(r.Protocol, conn.DestinationKey, string(c.id))
+	klog.Infof("onL7Request: [CONTAINER=%s] AFTER stats.get - SUCCESS", string(c.id))
 
 	klog.Infof("onL7Request: [CONTAINER=%s] stats.get completed, entering protocol switch (protocol=%s)", string(c.id), r.Protocol)
 
