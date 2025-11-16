@@ -732,12 +732,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 		return nil
 	}
 	klog.Infof("onL7Request: [CONTAINER=%s] connection found, destination=%s", string(c.id), conn.DestinationKey)
-
-	klog.Infof("onL7Request: [CONTAINER=%s] BEFORE stats.get (protocol=%s)", string(c.id), r.Protocol)
 	stats := c.l7Stats.get(r.Protocol, conn.DestinationKey, string(c.id))
-	klog.Infof("onL7Request: [CONTAINER=%s] AFTER stats.get - SUCCESS", string(c.id))
-
-	klog.Infof("onL7Request: [CONTAINER=%s] stats.get completed, entering protocol switch (protocol=%s)", string(c.id), r.Protocol)
 
 	ebpfTracesDisabled := false
 	for _, p := range c.processes {
@@ -764,18 +759,14 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 			klog.Warningf("onL7Request HTTP: [CONTAINER=%s] PATH FILTERED, skipping metrics for path=%q", string(c.id), path)
 		}
 	case l7.ProtocolHTTP2:
-		klog.Infof("onL7Request HTTP2: [CONTAINER=%s] ENTERED HTTP2 case, creating parser if needed", string(c.id))
 		if conn.http2Parser == nil {
 			conn.http2Parser = l7.NewHttp2Parser()
-			klog.Infof("onL7Request HTTP2: [CONTAINER=%s] created NEW http2Parser", string(c.id))
 		}
 		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration))
-		klog.Infof("onL7Request HTTP2: [CONTAINER=%s] parsed %d requests from payload (method=%d, payload_len=%d)",
-			string(c.id), len(requests), r.Method, len(r.Payload))
 
 		if len(requests) == 0 {
-			klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] ZERO requests parsed! payload_len=%d payload=%q",
-				string(c.id), len(r.Payload), string(r.Payload[:min(len(r.Payload), 100)]))
+			klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] ZERO requests parsed! method=%d payload_len=%d payload=%q",
+				string(c.id), r.Method, len(r.Payload), string(r.Payload[:min(len(r.Payload), 100)]))
 		}
 
 		for i, req := range requests {
