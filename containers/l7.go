@@ -19,7 +19,9 @@ type L7Metrics struct {
 func (m *L7Metrics) observe(status, method string, duration time.Duration) {
 	// Debug logs only for Envoy
 	isEnvoy := strings.HasPrefix(m.containerID, "/k8s/contour/contour-envoy")
-
+	if isEnvoy {
+		klog.Infof("L7Metrics.observe: [CONTAINER=%s] status=%q method=%q duration=%v", m.containerID, status, method, duration)
+	}
 	// Counter
 	if m.Requests != nil {
 		var err error
