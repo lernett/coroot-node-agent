@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -49,7 +50,7 @@ func NewHttp2Parser() *Http2Parser {
 	}
 }
 
-func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64) []Http2Request {
+func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, containerID string) []Http2Request {
 	if method == MethodHttp2ClientFrames {
 		l := len(http2.ClientPreface)
 		if len(payload) >= l && string(payload[:l]) == http2.ClientPreface {
@@ -137,6 +138,9 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64) []
 			next = len(payload)
 		}
 		if _, err := decoder.Write(payload[offset:next]); err != nil {
+			if strings.HasPrefix(containerID, "/k8s/contour/contour-envoy") {
+				klog.Warningf("Http2Parser: [CONTAINER=%s] ERROR WRITING PAYLOAD for streamId=%d: %v", containerID, h.StreamId, err)
+			}
 			continue
 		}
 		offset = next
@@ -145,6 +149,9 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64) []
 	for streamId, status := range statuses {
 		r := p.activeRequests[streamId]
 		if r == nil {
+			if strings.HasPrefix(containerID, "/k8s/contour/contour-envoy") {
+				klog.Warningf("Http2Parser: [CONTAINER=%s] NO REQUEST FOUND for streamId=%d", containerID, streamId)
+			}
 			continue
 		}
 		r.Status = status

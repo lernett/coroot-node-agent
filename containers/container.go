@@ -777,7 +777,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, timestamp uint64, r *l7.R
 		if conn.http2Parser == nil {
 			conn.http2Parser = l7.NewHttp2Parser()
 		}
-		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration))
+		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration), string(c.id))
 
 		if len(requests) == 0 && isEnvoy {
 			klog.Warningf("onL7Request HTTP2: [CONTAINER=%s] ZERO requests parsed! method=%d payload_len=%d payload=%q",
