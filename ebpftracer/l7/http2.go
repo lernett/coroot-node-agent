@@ -51,6 +51,8 @@ func NewHttp2Parser() *Http2Parser {
 }
 
 func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, containerID string) []Http2Request {
+	isTargetContainer := strings.HasPrefix(containerID, "/k8s/contour/contour-envoy")
+
 	if method == MethodHttp2ClientFrames {
 		l := len(http2.ClientPreface)
 		if len(payload) >= l && string(payload[:l]) == http2.ClientPreface {
@@ -58,6 +60,9 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 		}
 	}
 	if len(payload) == 0 {
+		if isTargetContainer {
+			klog.Warningf("Http2Parser: [CONTAINER=%s] EMPTY PAYLOAD, method=%v", containerID, method)
+		}
 		return nil
 	}
 
@@ -70,12 +75,21 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 	switch method {
 	case MethodHttp2ClientFrames:
 		decoder = p.clientDecoder
+		if isTargetContainer {
+			klog.Warningf("Http2Parser: [CONTAINER=%s] METHOD=ClientFrames, payloadLen=%d", containerID, len(payload))
+		}
 	case MethodHttp2ServerFrames:
 		decoder = p.serverDecoder
+		if isTargetContainer {
+			klog.Warningf("Http2Parser: [CONTAINER=%s] METHOD=ServerFrames, payloadLen=%d", containerID, len(payload))
+		}
 	default:
 		return nil
 	}
 	defer decoder.Close()
+
+	frameCount := 0
+	headersFrameCount := 0
 
 	for {
 		if len(payload)-offset < http2FrameHeaderLength {
@@ -88,13 +102,20 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 			StreamId: binary.BigEndian.Uint32(payload[offset+5:]) & (1<<31 - 1),
 		}
 		offset += http2FrameHeaderLength
+		frameCount++
+
 		if h.Type != http2.FrameHeaders {
 			if len(payload)-offset < h.Length {
+				if isTargetContainer {
+					klog.Warningf("Http2Parser: [CONTAINER=%s] FRAME TRUNCATED: type=%v, streamId=%d, expectedLen=%d, availableLen=%d",
+						containerID, h.Type, h.StreamId, h.Length, len(payload)-offset)
+				}
 				break
 			}
 			offset += h.Length
 			continue
 		}
+		headersFrameCount++
 		switch method {
 		case MethodHttp2ClientFrames:
 			req := p.activeRequests[h.StreamId]
@@ -145,11 +166,17 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 		}
 		offset = next
 	}
+
+	if isTargetContainer {
+		klog.Warningf("Http2Parser: [CONTAINER=%s] AFTER PARSING: totalFrames=%d, headersFrames=%d, statusesCount=%d, activeRequestsCount=%d, method=%v",
+			containerID, frameCount, headersFrameCount, len(statuses), len(p.activeRequests), method)
+	}
+
 	var res []Http2Request
 	for streamId, status := range statuses {
 		r := p.activeRequests[streamId]
 		if r == nil {
-			if strings.HasPrefix(containerID, "/k8s/contour/contour-envoy") {
+			if isTargetContainer {
 				klog.Warningf("Http2Parser: [CONTAINER=%s] NO REQUEST FOUND for streamId=%d", containerID, streamId)
 			}
 			continue
@@ -176,6 +203,11 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 			}
 		}
 		p.lastGcTime = kernelTime
+	}
+
+	if isTargetContainer && len(res) == 0 {
+		klog.Warningf("Http2Parser: [CONTAINER=%s] RETURNING EMPTY RESULT, method=%v, statusesCount=%d, activeRequestsCount=%d",
+			containerID, method, len(statuses), len(p.activeRequests))
 	}
 
 	return res
