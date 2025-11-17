@@ -182,6 +182,7 @@ func (r *Registry) retryTlsUprobes() {
 					klog.V(3).Infof("retrying TLS uprobe attachment for pid=%d (has HTTPS connections)", pid)
 					// Reset the flags to allow retry
 					p.openSslUprobesChecked = false
+					p.boringSslUprobesChecked = false
 					p.goTlsUprobesChecked = false
 					c.attachTlsUprobes(r.tracer, pid)
 				}

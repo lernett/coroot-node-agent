@@ -91,6 +91,18 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 	frameCount := 0
 	headersFrameCount := 0
 
+	if isTargetContainer && len(payload) > 0 {
+		headerPreview := payload
+		if len(headerPreview) > 18 {
+			headerPreview = headerPreview[:18]
+		}
+		klog.Warningf("Http2Parser: [CONTAINER=%s] PAYLOAD FIRST BYTES: %#v", containerID, headerPreview)
+	}
+
+	// Check if data looks like encrypted/random data (heuristic):
+	// If we see multiple frames with invalid types, it's likely encrypted data
+	invalidFrameTypes := 0
+
 	for {
 		if len(payload)-offset < http2FrameHeaderLength {
 			break
@@ -103,6 +115,22 @@ func (p *Http2Parser) Parse(method Method, payload []byte, kernelTime uint64, co
 		}
 		offset += http2FrameHeaderLength
 		frameCount++
+
+		if isTargetContainer && frameCount <= 2 {
+			klog.Warningf("Http2Parser: [CONTAINER=%s] FRAME#%d: length=%d, type=%v(%d), flags=%d, streamId=%d",
+				containerID, frameCount, h.Length, h.Type, byte(h.Type), h.Flags, h.StreamId)
+		}
+
+		// Check for invalid frame type (valid types are 0-9)
+		if byte(h.Type) > 9 {
+			invalidFrameTypes++
+			if invalidFrameTypes >= 2 {
+				if isTargetContainer {
+					klog.Warningf("Http2Parser: [CONTAINER=%s] DETECTED ENCRYPTED DATA: multiple invalid frame types, aborting parse", containerID)
+				}
+				return nil // Likely encrypted/TLS data
+			}
+		}
 
 		if h.Type != http2.FrameHeaders {
 			if len(payload)-offset < h.Length {

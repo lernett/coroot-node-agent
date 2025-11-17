@@ -38,13 +38,14 @@ type Process struct {
 	dotNetMonitor *DotNetMonitor
 	isGolangApp   bool
 
-	uprobes               []link.Link
-	goTlsUprobesChecked   bool
-	openSslUprobesChecked bool
-	pythonGilChecked      bool
-	nodejsChecked         bool
-	nodejsPrevStats       *ebpftracer.NodejsStats
-	pythonPrevStats       *ebpftracer.PythonStats
+	uprobes                 []link.Link
+	goTlsUprobesChecked     bool
+	openSslUprobesChecked   bool
+	boringSslUprobesChecked bool
+	pythonGilChecked        bool
+	nodejsChecked           bool
+	nodejsPrevStats         *ebpftracer.NodejsStats
+	pythonPrevStats         *ebpftracer.PythonStats
 
 	gpuUsageSamples []gpu.ProcessUsageSample
 }

@@ -117,6 +117,130 @@ func (t *Tracer) AttachOpenSslUprobes(pid uint32) []link.Link {
 	return links
 }
 
+func (t *Tracer) AttachBoringSslUprobes(pid uint32) []link.Link {
+	if t.disableL7Tracing {
+		return nil
+	}
+
+	// Check if BoringSSL uprobes are available (eBPF programs compiled)
+	if t.uprobes["boringssl_SSL_write_enter"] == nil {
+		// BoringSSL support not compiled in
+		// Need to recompile eBPF: cd ebpftracer && make build
+		return nil
+	}
+
+	path := proc.Path(pid, "exe")
+
+	log := func(msg string, err error) {
+		if err != nil {
+			for _, s := range []string{"no such file or directory", "no such process", "permission denied"} {
+				if strings.HasSuffix(err.Error(), s) {
+					return
+				}
+			}
+			klog.ErrorfDepth(1, "pid=%d: %s: %s", pid, msg, err)
+			return
+		}
+		klog.InfofDepth(1, "pid=%d: %s", pid, msg)
+	}
+
+	// Check if binary has BoringSSL symbols
+	ef, err := elf.Open(path)
+	if err != nil {
+		log("failed to open as elf binary", err)
+		return nil
+	}
+	defer ef.Close()
+
+	symbols, err := ef.Symbols()
+	if err != nil {
+		if errors.Is(err, elf.ErrNoSymbols) {
+			// Try dynamic symbols for stripped binaries
+			symbols, err = ef.DynamicSymbols()
+			if err != nil {
+				return nil
+			}
+		} else {
+			return nil
+		}
+	}
+
+	// Look for BoringSSL symbols (SSL_write, SSL_read, etc.)
+	boringSslSymbols := make(map[string]elf.Symbol)
+	for _, s := range symbols {
+		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Size == 0 {
+			continue
+		}
+		// BoringSSL uses same function names as OpenSSL
+		switch s.Name {
+		case "SSL_write", "SSL_read", "SSL_read_ex":
+			boringSslSymbols[s.Name] = s
+		}
+	}
+
+	if len(boringSslSymbols) == 0 {
+		return nil
+	}
+
+	exe, err := link.OpenExecutable(path)
+	if err != nil {
+		log("failed to open executable for uprobe attachment", err)
+		return nil
+	}
+
+	var links []link.Link
+
+	// Attach SSL_write
+	if sym, ok := boringSslSymbols["SSL_write"]; ok {
+		l, err := exe.Uprobe("SSL_write", t.uprobes["boringssl_SSL_write_enter"], &link.UprobeOptions{Address: sym.Value})
+		if err != nil {
+			log("failed to attach SSL_write uprobe", err)
+			return nil
+		}
+		links = append(links, l)
+	}
+
+	// Attach SSL_read
+	if sym, ok := boringSslSymbols["SSL_read"]; ok {
+		l, err := exe.Uprobe("SSL_read", t.uprobes["boringssl_SSL_read_enter"], &link.UprobeOptions{Address: sym.Value})
+		if err != nil {
+			log("failed to attach SSL_read uprobe", err)
+			return nil
+		}
+		links = append(links, l)
+
+		l, err = exe.Uretprobe("SSL_read", t.uprobes["boringssl_SSL_read_exit"], &link.UprobeOptions{Address: sym.Value})
+		if err != nil {
+			log("failed to attach SSL_read uretprobe", err)
+			return nil
+		}
+		links = append(links, l)
+	}
+
+	// Attach SSL_read_ex if available
+	if sym, ok := boringSslSymbols["SSL_read_ex"]; ok {
+		l, err := exe.Uprobe("SSL_read_ex", t.uprobes["boringssl_SSL_read_ex_enter"], &link.UprobeOptions{Address: sym.Value})
+		if err != nil {
+			log("failed to attach SSL_read_ex uprobe", err)
+			return nil
+		}
+		links = append(links, l)
+
+		l, err = exe.Uretprobe("SSL_read_ex", t.uprobes["boringssl_SSL_read_exit"], &link.UprobeOptions{Address: sym.Value})
+		if err != nil {
+			log("failed to attach SSL_read_ex uretprobe", err)
+			return nil
+		}
+		links = append(links, l)
+	}
+
+	if len(links) > 0 {
+		log("BoringSSL uprobes attached", nil)
+	}
+
+	return links
+}
+
 func (t *Tracer) AttachGoTlsUprobes(pid uint32) ([]link.Link, bool) {
 	isGolangApp := false
 	if t.disableL7Tracing {

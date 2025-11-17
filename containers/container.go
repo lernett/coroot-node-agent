@@ -1285,6 +1285,10 @@ func (c *Container) attachTlsUprobes(tracer *ebpftracer.Tracer, pid uint32) {
 		p.uprobes = append(p.uprobes, tracer.AttachOpenSslUprobes(pid)...)
 		p.openSslUprobesChecked = true
 	}
+	if !p.boringSslUprobesChecked {
+		p.uprobes = append(p.uprobes, tracer.AttachBoringSslUprobes(pid)...)
+		p.boringSslUprobesChecked = true
+	}
 	if !p.goTlsUprobesChecked {
 		uprobes, isGolangApp := tracer.AttachGoTlsUprobes(pid)
 		p.isGolangApp = isGolangApp
